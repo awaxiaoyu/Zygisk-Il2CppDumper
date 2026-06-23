@@ -16,6 +16,15 @@
 #include <sys/mman.h>
 #include <linux/unistd.h>
 #include <array>
+#include <string>
+
+static void UnmapLibraryData(void *&data, size_t &length) {
+    if (data && data != MAP_FAILED && length > 0) {
+        munmap(data, length);
+    }
+    data = nullptr;
+    length = 0;
+}
 
 void hack_start(const char *game_data_dir) {
     bool load = false;
@@ -23,8 +32,11 @@ void hack_start(const char *game_data_dir) {
         void *handle = xdl_open("libil2cpp.so", 0);
         if (handle) {
             load = true;
-            il2cpp_api_init(handle);
-            il2cpp_dump(game_data_dir);
+            if (il2cpp_api_init(handle)) {
+                il2cpp_dump(game_data_dir);
+            } else {
+                LOGE("skip dump because il2cpp api init failed");
+            }
             break;
         } else {
             sleep(1);
@@ -36,8 +48,20 @@ void hack_start(const char *game_data_dir) {
 }
 
 std::string GetLibDir(JavaVM *vms) {
+    if (!vms) {
+        LOGE("JavaVM is null");
+        return {};
+    }
     JNIEnv *env = nullptr;
-    vms->AttachCurrentThread(&env, nullptr);
+    if (vms->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        LOGE("AttachCurrentThread failed");
+        return {};
+    }
+    auto finish = [&](std::string result) {
+        vms->DetachCurrentThread();
+        return result;
+    };
+
     jclass activity_thread_clz = env->FindClass("android/app/ActivityThread");
     if (activity_thread_clz != nullptr) {
         jmethodID currentApplicationId = env->GetStaticMethodID(activity_thread_clz,
@@ -46,33 +70,53 @@ std::string GetLibDir(JavaVM *vms) {
         if (currentApplicationId) {
             jobject application = env->CallStaticObjectMethod(activity_thread_clz,
                                                               currentApplicationId);
-            jclass application_clazz = env->GetObjectClass(application);
-            if (application_clazz) {
-                jmethodID get_application_info = env->GetMethodID(application_clazz,
-                                                                  "getApplicationInfo",
-                                                                  "()Landroid/content/pm/ApplicationInfo;");
-                if (get_application_info) {
-                    jobject application_info = env->CallObjectMethod(application,
-                                                                     get_application_info);
-                    jfieldID native_library_dir_id = env->GetFieldID(
-                            env->GetObjectClass(application_info), "nativeLibraryDir",
-                            "Ljava/lang/String;");
-                    if (native_library_dir_id) {
-                        auto native_library_dir_jstring = (jstring) env->GetObjectField(
-                                application_info, native_library_dir_id);
-                        auto path = env->GetStringUTFChars(native_library_dir_jstring, nullptr);
-                        LOGI("lib dir %s", path);
-                        std::string lib_dir(path);
-                        env->ReleaseStringUTFChars(native_library_dir_jstring, path);
-                        return lib_dir;
+            if (application) {
+                jclass application_clazz = env->GetObjectClass(application);
+                if (application_clazz) {
+                    jmethodID get_application_info = env->GetMethodID(application_clazz,
+                                                                      "getApplicationInfo",
+                                                                      "()Landroid/content/pm/ApplicationInfo;");
+                    if (get_application_info) {
+                        jobject application_info = env->CallObjectMethod(application,
+                                                                         get_application_info);
+                        if (application_info) {
+                            jclass application_info_clazz = env->GetObjectClass(application_info);
+                            if (application_info_clazz) {
+                                jfieldID native_library_dir_id = env->GetFieldID(
+                                        application_info_clazz, "nativeLibraryDir",
+                                        "Ljava/lang/String;");
+                                if (native_library_dir_id) {
+                                    auto native_library_dir_jstring = (jstring) env->GetObjectField(
+                                            application_info, native_library_dir_id);
+                                    if (native_library_dir_jstring) {
+                                        auto path = env->GetStringUTFChars(native_library_dir_jstring,
+                                                                           nullptr);
+                                        if (path) {
+                                            LOGI("lib dir %s", path);
+                                            std::string lib_dir(path);
+                                            env->ReleaseStringUTFChars(native_library_dir_jstring,
+                                                                       path);
+                                            return finish(lib_dir);
+                                        }
+                                    }
+                                    LOGE("nativeLibraryDir value not found");
+                                } else {
+                                    LOGE("nativeLibraryDir not found");
+                                }
+                            } else {
+                                LOGE("ApplicationInfo class not found");
+                            }
+                        } else {
+                            LOGE("ApplicationInfo not found");
+                        }
                     } else {
-                        LOGE("nativeLibraryDir not found");
+                        LOGE("getApplicationInfo not found");
                     }
                 } else {
-                    LOGE("getApplicationInfo not found");
+                    LOGE("application class not found");
                 }
             } else {
-                LOGE("application class not found");
+                LOGE("currentApplication returned null");
             }
         } else {
             LOGE("currentApplication not found");
@@ -80,7 +124,7 @@ std::string GetLibDir(JavaVM *vms) {
     } else {
         LOGE("ActivityThread not found");
     }
-    return {};
+    return finish({});
 }
 
 static std::string GetNativeBridgeLibrary() {
@@ -112,16 +156,23 @@ struct NativeBridgeCallbacks {
 };
 
 bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
-    //TODO 等待houdini初始化
     sleep(5);
 
     auto libart = dlopen("libart.so", RTLD_NOW);
+    if (!libart) {
+        LOGE("dlopen libart.so failed");
+        return false;
+    }
     auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(libart,
                                                                              "JNI_GetCreatedJavaVMs");
     LOGI("JNI_GetCreatedJavaVMs %p", JNI_GetCreatedJavaVMs);
+    if (!JNI_GetCreatedJavaVMs) {
+        LOGE("JNI_GetCreatedJavaVMs not found");
+        return false;
+    }
     JavaVM *vms_buf[1];
-    JavaVM *vms;
-    jsize num_vms;
+    JavaVM *vms = nullptr;
+    jsize num_vms = 0;
     jint status = JNI_GetCreatedJavaVMs(vms_buf, 1, &num_vms);
     if (status == JNI_OK && num_vms > 0) {
         vms = vms_buf[0];
@@ -137,7 +188,11 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
     }
     if (lib_dir.find("/lib/x86") != std::string::npos) {
         LOGI("no need NativeBridge");
-        munmap(data, length);
+        UnmapLibraryData(data, length);
+        return false;
+    }
+    if (!data || length == 0) {
+        LOGE("NativeBridge arm library data not available");
         return false;
     }
 
@@ -156,33 +211,61 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
             LOGI("NativeBridgeGetTrampoline %p", callbacks->getTrampoline);
 
             int fd = syscall(__NR_memfd_create, "anon", MFD_CLOEXEC);
-            ftruncate(fd, (off_t) length);
+            if (fd == -1) {
+                LOGE("memfd_create failed");
+                UnmapLibraryData(data, length);
+                return false;
+            }
+            if (ftruncate(fd, (off_t) length) != 0) {
+                LOGE("ftruncate memfd failed");
+                close(fd);
+                UnmapLibraryData(data, length);
+                return false;
+            }
             void *mem = mmap(nullptr, length, PROT_WRITE, MAP_SHARED, fd, 0);
+            if (mem == MAP_FAILED) {
+                LOGE("mmap memfd failed");
+                close(fd);
+                UnmapLibraryData(data, length);
+                return false;
+            }
             memcpy(mem, data, length);
             munmap(mem, length);
-            munmap(data, length);
+            UnmapLibraryData(data, length);
             char path[PATH_MAX];
             snprintf(path, PATH_MAX, "/proc/self/fd/%d", fd);
             LOGI("arm path %s", path);
 
-            void *arm_handle;
-            if (api_level >= 26) {
+            void *arm_handle = nullptr;
+            if (api_level >= 26 && callbacks->loadLibraryExt) {
                 arm_handle = callbacks->loadLibraryExt(path, RTLD_NOW, (void *) 3);
-            } else {
+            } else if (callbacks->loadLibrary) {
                 arm_handle = callbacks->loadLibrary(path, RTLD_NOW);
             }
             if (arm_handle) {
                 LOGI("arm handle %p", arm_handle);
+                if (!callbacks->getTrampoline) {
+                    LOGE("NativeBridgeGetTrampoline not found");
+                    close(fd);
+                    return false;
+                }
                 auto init = (void (*)(JavaVM *, void *)) callbacks->getTrampoline(arm_handle,
                                                                                   "JNI_OnLoad",
                                                                                   nullptr, 0);
                 LOGI("JNI_OnLoad %p", init);
+                if (!init) {
+                    LOGE("JNI_OnLoad trampoline not found");
+                    close(fd);
+                    return false;
+                }
                 init(vms, (void *) game_data_dir);
+                close(fd);
                 return true;
             }
             close(fd);
         }
     }
+    UnmapLibraryData(data, length);
     return false;
 }
 

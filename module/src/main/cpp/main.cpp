@@ -38,12 +38,12 @@ public:
     }
 
 private:
-    Api *api;
-    JNIEnv *env;
-    bool enable_hack;
-    char *game_data_dir;
-    void *data;
-    size_t length;
+    Api *api = nullptr;
+    JNIEnv *env = nullptr;
+    bool enable_hack = false;
+    char *game_data_dir = nullptr;
+    void *data = nullptr;
+    size_t length = 0;
 
     void preSpecialize(const char *package_name, const char *app_data_dir) {
         if (strcmp(package_name, GamePackageName) == 0) {
@@ -63,12 +63,20 @@ private:
             int fd = openat(dirfd, path, O_RDONLY);
             if (fd != -1) {
                 struct stat sb{};
-                fstat(fd, &sb);
-                length = sb.st_size;
-                data = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+                if (fstat(fd, &sb) == 0 && sb.st_size > 0) {
+                    length = static_cast<size_t>(sb.st_size);
+                    data = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+                    if (data == MAP_FAILED) {
+                        LOGW("Unable to mmap %s", path);
+                        data = nullptr;
+                        length = 0;
+                    }
+                } else {
+                    LOGW("Invalid arm file size: %s", path);
+                }
                 close(fd);
             } else {
-                LOGW("Unable to open arm file");
+                LOGW("Unable to open %s", path);
             }
 #endif
         } else {

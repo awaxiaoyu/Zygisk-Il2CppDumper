@@ -236,7 +236,7 @@ std::string dump_field(Il2CppClass *klass) {
         auto field_class = il2cpp_class_from_type(field_type);
         outPut << il2cpp_class_get_name(field_class) << " " << il2cpp_field_get_name(field);
         //TODO 获取构造函数初始化后的字段值
-        if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum) {
+        if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum && il2cpp_field_static_get_value) {
             uint64_t val = 0;
             il2cpp_field_static_get_value(field, &val);
             outPut << " = " << std::dec << val;
@@ -322,49 +322,145 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
-void il2cpp_api_init(void *handle) {
+bool il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
+
+    bool ok = true;
+#define REQUIRE_IL2CPP_API(n)       \
+    if (!(n)) {                     \
+        LOGE("required api not found %s", #n); \
+        ok = false;                 \
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
+
+    REQUIRE_IL2CPP_API(il2cpp_domain_get_assemblies)
+    REQUIRE_IL2CPP_API(il2cpp_is_vm_thread)
+    REQUIRE_IL2CPP_API(il2cpp_domain_get)
+    REQUIRE_IL2CPP_API(il2cpp_thread_attach)
+    REQUIRE_IL2CPP_API(il2cpp_assembly_get_image)
+    REQUIRE_IL2CPP_API(il2cpp_image_get_name)
+    REQUIRE_IL2CPP_API(il2cpp_class_from_type)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_name)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_namespace)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_flags)
+    REQUIRE_IL2CPP_API(il2cpp_class_is_valuetype)
+    REQUIRE_IL2CPP_API(il2cpp_class_is_enum)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_parent)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_type)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_interfaces)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_fields)
+    REQUIRE_IL2CPP_API(il2cpp_field_get_flags)
+    REQUIRE_IL2CPP_API(il2cpp_field_get_type)
+    REQUIRE_IL2CPP_API(il2cpp_field_get_name)
+    REQUIRE_IL2CPP_API(il2cpp_field_get_offset)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_properties)
+    REQUIRE_IL2CPP_API(il2cpp_property_get_get_method)
+    REQUIRE_IL2CPP_API(il2cpp_property_get_set_method)
+    REQUIRE_IL2CPP_API(il2cpp_property_get_name)
+    REQUIRE_IL2CPP_API(il2cpp_class_get_methods)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_flags)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_return_type)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_name)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_param_count)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_param)
+    REQUIRE_IL2CPP_API(il2cpp_method_get_param_name)
+    if (!il2cpp_image_get_class || !il2cpp_image_get_class_count) {
+        REQUIRE_IL2CPP_API(il2cpp_get_corlib)
+        REQUIRE_IL2CPP_API(il2cpp_class_from_name)
+        REQUIRE_IL2CPP_API(il2cpp_class_get_method_from_name)
+        REQUIRE_IL2CPP_API(il2cpp_string_new)
+        REQUIRE_IL2CPP_API(il2cpp_class_from_system_type)
+    }
+
+#undef REQUIRE_IL2CPP_API
+
+    if (!ok) {
+        LOGE("Failed to initialize il2cpp api.");
+        return false;
+    }
+
+    Dl_info dlInfo;
+    if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
+        il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+    }
+    LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+
+    // Game update note: if a new version hides more Il2CPP exports, add a resolver here
+    // and keep dumping disabled until every required API is resolved.
+    for (int i = 0; i < 30 && !il2cpp_is_vm_thread(nullptr); ++i) {
         LOGI("Waiting for il2cpp_init...");
         sleep(1);
     }
+    if (!il2cpp_is_vm_thread(nullptr)) {
+        LOGE("il2cpp init wait timeout");
+        return false;
+    }
     auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
+    if (!domain) {
+        LOGE("il2cpp_domain_get returned null");
+        return false;
+    }
+    if (!il2cpp_thread_attach(domain)) {
+        LOGE("il2cpp_thread_attach failed");
+        return false;
+    }
+    return true;
 }
 
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
-    size_t size;
+    if (!outDir) {
+        LOGE("dump output dir is null");
+        return;
+    }
+    size_t size = 0;
     auto domain = il2cpp_domain_get();
+    if (!domain) {
+        LOGE("il2cpp_domain_get returned null while dumping");
+        return;
+    }
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    if (!assemblies) {
+        LOGE("il2cpp_domain_get_assemblies returned null");
+        return;
+    }
     std::stringstream imageOutput;
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
-        imageOutput << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
+        if (!image) {
+            continue;
+        }
+        auto image_name = il2cpp_image_get_name(image);
+        if (!image_name) {
+            continue;
+        }
+        imageOutput << "// Image " << i << ": " << image_name << "\n";
     }
     std::vector<std::string> outPuts;
-    if (il2cpp_image_get_class) {
+    if (il2cpp_image_get_class && il2cpp_image_get_class_count) {
         LOGI("Version greater than 2018.3");
         //使用il2cpp_image_get_class
         for (int i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
+            if (!image) {
+                continue;
+            }
             std::stringstream imageStr;
-            imageStr << "\n// Dll : " << il2cpp_image_get_name(image);
+            auto image_name = il2cpp_image_get_name(image);
+            if (!image_name) {
+                continue;
+            }
+            imageStr << "\n// Dll : " << image_name;
             auto classCount = il2cpp_image_get_class_count(image);
             for (int j = 0; j < classCount; ++j) {
                 auto klass = il2cpp_image_get_class(image, j);
+                if (!klass) {
+                    continue;
+                }
                 auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
+                if (!type) {
+                    continue;
+                }
                 //LOGD("type name : %s", il2cpp_type_get_name(type));
                 auto outPut = imageStr.str() + dump_type(type);
                 outPuts.push_back(outPut);
@@ -374,7 +470,15 @@ void il2cpp_dump(const char *outDir) {
         LOGI("Version less than 2018.3");
         //使用反射
         auto corlib = il2cpp_get_corlib();
+        if (!corlib) {
+            LOGE("il2cpp_get_corlib returned null");
+            return;
+        }
         auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
+        if (!assemblyClass) {
+            LOGE("System.Reflection.Assembly not found");
+            return;
+        }
         auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
         auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
         if (assemblyLoad && assemblyLoad->methodPointer) {
@@ -393,8 +497,14 @@ void il2cpp_dump(const char *outDir) {
         typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
         for (int i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
+            if (!image) {
+                continue;
+            }
             std::stringstream imageStr;
             auto image_name = il2cpp_image_get_name(image);
+            if (!image_name) {
+                continue;
+            }
             imageStr << "\n// Dll : " << image_name;
             //LOGD("image name : %s", image->name);
             auto imageName = std::string(image_name);
@@ -404,12 +514,27 @@ void il2cpp_dump(const char *outDir) {
             auto reflectionAssembly = ((Assembly_Load_ftn) assemblyLoad->methodPointer)(nullptr,
                                                                                         assemblyFileName,
                                                                                         nullptr);
+            if (!reflectionAssembly) {
+                continue;
+            }
             auto reflectionTypes = ((Assembly_GetTypes_ftn) assemblyGetTypes->methodPointer)(
                     reflectionAssembly, nullptr);
+            if (!reflectionTypes) {
+                continue;
+            }
             auto items = reflectionTypes->vector;
             for (int j = 0; j < reflectionTypes->max_length; ++j) {
+                if (!items[j]) {
+                    continue;
+                }
                 auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
+                if (!klass) {
+                    continue;
+                }
                 auto type = il2cpp_class_get_type(klass);
+                if (!type) {
+                    continue;
+                }
                 //LOGD("type name : %s", il2cpp_type_get_name(type));
                 auto outPut = imageStr.str() + dump_type(type);
                 outPuts.push_back(outPut);
