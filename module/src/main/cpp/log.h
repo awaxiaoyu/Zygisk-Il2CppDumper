@@ -8,8 +8,12 @@
 #include <android/log.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cerrno>
+#include <cstring>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #define LOG_TAG "Perfare"
@@ -19,6 +23,25 @@ namespace zygisk_il2cppdumper_log {
 inline std::mutex g_log_mutex;
 inline FILE *g_log_file = nullptr;
 inline std::string g_log_path;
+
+inline bool EnsureDir(const std::string &path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    if (mkdir(path.c_str(), 0775) == 0) {
+        return true;
+    }
+
+    if (errno == EEXIST) {
+        struct stat st{};
+        return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+
+    __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Unable to create log dir %s: %s",
+                        path.c_str(), strerror(errno));
+    return false;
+}
 
 inline const char *LogLevelName(int priority) {
     switch (priority) {
@@ -34,14 +57,18 @@ inline const char *LogLevelName(int priority) {
     }
 }
 
-inline bool LogInit(const char *app_data_dir) {
-    if (!app_data_dir || app_data_dir[0] == '\0') {
+inline bool LogInit(const char *package_name) {
+    if (!package_name || package_name[0] == '\0') {
         return false;
     }
 
-    // Game update note: if the target app changes its data layout, keep this path
-    // in sync with the package check and the module's files directory.
-    auto path = std::string(app_data_dir).append("/files/zygisk_il2cppdumper.log");
+    // Game update note: if the target package name changes, this public log
+    // directory must stay in sync with GamePackageName.
+    auto dir = std::string("/sdcard/").append(package_name);
+    if (!EnsureDir("/sdcard") || !EnsureDir(dir)) {
+        return false;
+    }
+    auto path = dir.append("/zygisk_il2cppdumper.log");
     std::lock_guard<std::mutex> lock(g_log_mutex);
     if (g_log_file) {
         fclose(g_log_file);
@@ -82,8 +109,8 @@ inline void LogWrite(int priority, const char *fmt, ...) {
 
 } // namespace zygisk_il2cppdumper_log
 
-inline bool LogInit(const char *app_data_dir) {
-    return zygisk_il2cppdumper_log::LogInit(app_data_dir);
+inline bool LogInit(const char *package_name) {
+    return zygisk_il2cppdumper_log::LogInit(package_name);
 }
 
 #define LOGD(...) zygisk_il2cppdumper_log::LogWrite(ANDROID_LOG_DEBUG, __VA_ARGS__)

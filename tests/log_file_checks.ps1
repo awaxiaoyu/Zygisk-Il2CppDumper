@@ -19,6 +19,8 @@ function Assert-Contains {
 Assert-Contains $logHeader 'inline\s+bool\s+LogInit\(' 'log.h must expose file log initialization.'
 Assert-Contains $logHeader 'inline\s+void\s+LogWrite\(' 'log.h must expose a shared log writer.'
 Assert-Contains $logHeader 'zygisk_il2cppdumper\.log' 'log file name must be stable and predictable.'
-Assert-Contains $main 'LogInit\(app_data_dir\);' 'target process must initialize file logging before module logs.'
+Assert-Contains $logHeader '/sdcard/' 'log.h must write logs under the shared storage root.'
+Assert-Contains $logHeader 'EnsureDir\(' 'log.h must create the package log directory before opening the log.'
+Assert-Contains $main 'LogInit\(package_name\);' 'target process must initialize public file logging before module logs.'
 
 Write-Host "log file checks passed"
