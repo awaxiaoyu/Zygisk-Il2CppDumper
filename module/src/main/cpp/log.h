@@ -29,12 +29,16 @@ inline bool EnsureDir(const std::string &path) {
         return false;
     }
 
+    struct stat st{};
+    if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;
+    }
+
     if (mkdir(path.c_str(), 0775) == 0) {
         return true;
     }
 
     if (errno == EEXIST) {
-        struct stat st{};
         return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
     }
 
@@ -65,7 +69,11 @@ inline bool LogInit(const char *package_name) {
     // Game update note: if the target package name changes, this public log
     // directory must stay in sync with GamePackageName.
     auto dir = std::string("/sdcard/").append(package_name);
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "init file log package=%s dir=%s",
+                        package_name, dir.c_str());
     if (!EnsureDir("/sdcard") || !EnsureDir(dir)) {
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "file log dir unavailable: %s",
+                            dir.c_str());
         return false;
     }
     auto path = dir.append("/zygisk_il2cppdumper.log");
@@ -78,8 +86,8 @@ inline bool LogInit(const char *package_name) {
     g_log_path = path;
     g_log_file = fopen(g_log_path.c_str(), "a");
     if (!g_log_file) {
-        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Unable to open file log: %s",
-                            g_log_path.c_str());
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Unable to open file log: %s: %s",
+                            g_log_path.c_str(), strerror(errno));
         return false;
     }
 

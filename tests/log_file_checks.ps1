@@ -21,6 +21,8 @@ Assert-Contains $logHeader 'inline\s+void\s+LogWrite\(' 'log.h must expose a sha
 Assert-Contains $logHeader 'zygisk_il2cppdumper\.log' 'log file name must be stable and predictable.'
 Assert-Contains $logHeader '/sdcard/' 'log.h must write logs under the shared storage root.'
 Assert-Contains $logHeader 'EnsureDir\(' 'log.h must create the package log directory before opening the log.'
+Assert-Contains $logHeader 'init file log package=%s dir=%s' 'LogInit must announce the public log target before directory creation.'
+Assert-Contains $logHeader 'Unable to open file log: %s: %s' 'file log open failures must include errno text.'
 Assert-Contains $main 'LogInit\(package_name\);' 'target process must initialize public file logging before module logs.'
 
 Write-Host "log file checks passed"
