@@ -20,6 +20,9 @@ public:
     void onLoad(Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
+        if (env->GetJavaVM(&vm) != JNI_OK) {
+            vm = nullptr;
+        }
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
@@ -32,7 +35,7 @@ public:
 
     void postAppSpecialize(const AppSpecializeArgs *) override {
         if (enable_hack) {
-            std::thread hack_thread(hack_prepare, game_data_dir, data, length);
+            std::thread hack_thread(hack_prepare, vm, game_data_dir, data, length);
             hack_thread.detach();
         }
     }
@@ -40,6 +43,7 @@ public:
 private:
     Api *api = nullptr;
     JNIEnv *env = nullptr;
+    JavaVM *vm = nullptr;
     bool enable_hack = false;
     char *game_data_dir = nullptr;
     void *data = nullptr;

@@ -181,41 +181,16 @@ struct NativeBridgeCallbacks {
     void *(*loadLibraryExt)(const char *libpath, int flag, void *ns);
 };
 
-bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
+bool NativeBridgeLoad(JavaVM *vm, const char *game_data_dir, int api_level, void *data,
+                      size_t length) {
     sleep(5);
 
-    const char *libart_candidates[] = {
-            "libart.so",
-            "/apex/com.android.art/lib64/libart.so",
-            "/apex/com.android.art/lib/libart.so",
-            "/system/lib64/libart.so",
-            "/system/lib/libart.so",
-    };
-    auto libart = OpenLibraryCandidates(libart_candidates,
-                                        sizeof(libart_candidates) / sizeof(libart_candidates[0]));
-    if (!libart) {
-        LOGE("dlopen libart.so failed from all candidates");
-        return false;
-    }
-    auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(libart,
-                                                                             "JNI_GetCreatedJavaVMs");
-    LOGI("JNI_GetCreatedJavaVMs %p", JNI_GetCreatedJavaVMs);
-    if (!JNI_GetCreatedJavaVMs) {
-        LOGE("JNI_GetCreatedJavaVMs not found");
-        return false;
-    }
-    JavaVM *vms_buf[1];
-    JavaVM *vms = nullptr;
-    jsize num_vms = 0;
-    jint status = JNI_GetCreatedJavaVMs(vms_buf, 1, &num_vms);
-    if (status == JNI_OK && num_vms > 0) {
-        vms = vms_buf[0];
-    } else {
-        LOGE("GetCreatedJavaVMs error");
+    if (!vm) {
+        LOGE("JavaVM from Zygisk is null");
         return false;
     }
 
-    auto lib_dir = GetLibDir(vms);
+    auto lib_dir = GetLibDir(vm);
     if (lib_dir.empty()) {
         LOGE("GetLibDir error");
         return false;
@@ -306,7 +281,7 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
                     close(fd);
                     return false;
                 }
-                init(vms, (void *) game_data_dir);
+                init(vm, (void *) game_data_dir);
                 close(fd);
                 return true;
             }
@@ -317,13 +292,13 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
     return false;
 }
 
-void hack_prepare(const char *game_data_dir, void *data, size_t length) {
+void hack_prepare(JavaVM *vm, const char *game_data_dir, void *data, size_t length) {
     LOGI("hack thread: %d", gettid());
     int api_level = android_get_device_api_level();
     LOGI("api level: %d", api_level);
 
 #if defined(__i386__) || defined(__x86_64__)
-    if (!NativeBridgeLoad(game_data_dir, api_level, data, length)) {
+    if (!NativeBridgeLoad(vm, game_data_dir, api_level, data, length)) {
 #endif
         hack_start(game_data_dir);
 #if defined(__i386__) || defined(__x86_64__)

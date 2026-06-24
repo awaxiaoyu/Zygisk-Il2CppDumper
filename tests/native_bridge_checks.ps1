@@ -16,8 +16,12 @@ function Assert-Contains {
 }
 
 Assert-Contains $hack 'OpenLibraryCandidates\(' 'hack.cpp must use a multi-path dlopen helper.'
-Assert-Contains $hack '/apex/com\.android\.art/lib64/libart\.so' 'libart fallback must include the ART APEX lib64 path.'
-Assert-Contains $hack '/apex/com\.android\.art/lib/libart\.so' 'libart fallback must include the ART APEX lib path.'
+Assert-Contains $hack 'NativeBridgeLoad\(JavaVM\s*\*vm,' 'NativeBridgeLoad must use the JavaVM supplied by Zygisk.'
+Assert-Contains $hack 'hack_prepare\(JavaVM\s*\*vm,' 'hack_prepare must receive JavaVM from the module entry path.'
+Assert-Contains $hack 'if\s*\(!vm\)' 'NativeBridgeLoad must guard a null JavaVM.'
+if ($hack -match 'JNI_GetCreatedJavaVMs|libart_candidates|dlopen libart') {
+    throw 'hack.cpp must not dlopen libart or call JNI_GetCreatedJavaVMs to recover JavaVM.'
+}
 Assert-Contains $hack '/system/lib64/libhoudini\.so' 'NativeBridge fallback must include system lib64 houdini.'
 Assert-Contains $hack '/system/lib/libhoudini\.so' 'NativeBridge fallback must include system lib houdini.'
 Assert-Contains $hack 'constexpr\s+int\s+kIl2CppWaitSeconds\s*=\s*120\s*;' 'libil2cpp wait window must allow late Unity loads.'

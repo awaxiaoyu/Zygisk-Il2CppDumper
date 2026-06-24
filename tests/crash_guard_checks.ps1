@@ -24,7 +24,10 @@ Assert-Contains $main 'mmap\([^;]+;\s*if\s*\(\s*data\s*==\s*MAP_FAILED\s*\)' 'mm
 
 Assert-Contains $hack 'bool\s+NativeBridgeLoad\([^)]*\)' 'NativeBridgeLoad must return a status.'
 Assert-Contains $hack 'if\s*\(\s*!data\s*\|\|\s*length\s*==\s*0\s*\)' 'NativeBridgeLoad must reject empty mapped library data before memcpy.'
-Assert-Contains $hack 'if\s*\(\s*!JNI_GetCreatedJavaVMs\s*\)' 'JNI_GetCreatedJavaVMs must be checked before calling through dlsym.'
+Assert-Contains $hack 'if\s*\(\s*!vm\s*\)' 'NativeBridgeLoad must reject a missing Zygisk JavaVM.'
+if ($hack -match 'JNI_GetCreatedJavaVMs') {
+    throw 'NativeBridgeLoad must use the Zygisk JavaVM instead of JNI_GetCreatedJavaVMs.'
+}
 Assert-Contains $hack 'if\s*\(\s*!init\s*\)' 'NativeBridge trampoline JNI_OnLoad must be checked before calling.'
 
 Assert-Contains $dump 'bool\s+il2cpp_api_init\s*\(' 'il2cpp_api_init must report initialization failure to caller.'
