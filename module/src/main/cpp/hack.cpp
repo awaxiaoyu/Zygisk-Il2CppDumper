@@ -18,6 +18,8 @@
 #include <array>
 #include <string>
 
+constexpr int kIl2CppWaitSeconds = 120;
+
 static void UnmapLibraryData(void *&data, size_t &length) {
     if (data && data != MAP_FAILED && length > 0) {
         munmap(data, length);
@@ -26,10 +28,34 @@ static void UnmapLibraryData(void *&data, size_t &length) {
     length = 0;
 }
 
+static void *OpenLibraryCandidates(const char *const *candidates, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        const char *candidate = candidates[i];
+        if (!candidate || candidate[0] == '\0') {
+            continue;
+        }
+
+        void *handle = dlopen(candidate, RTLD_NOW);
+        if (handle) {
+            LOGI("dlopen %s success", candidate);
+            return handle;
+        }
+
+        const char *error = dlerror();
+        LOGW("dlopen %s failed: %s", candidate, error ? error : "unknown");
+    }
+    return nullptr;
+}
+
 void hack_start(const char *game_data_dir) {
     bool load = false;
-    for (int i = 0; i < 10; i++) {
-        void *handle = xdl_open("libil2cpp.so", 0);
+    // Game update note: if a new Unity version delays libil2cpp loading longer,
+    // tune kIl2CppWaitSeconds instead of removing the guarded wait.
+    for (int i = 0; i < kIl2CppWaitSeconds; i++) {
+        void *handle = xdl_open("libil2cpp.so", XDL_DEFAULT);
+        if (!handle) {
+            handle = xdl_open("libil2cpp.so", XDL_TRY_FORCE_LOAD);
+        }
         if (handle) {
             load = true;
             if (il2cpp_api_init(handle)) {
@@ -158,9 +184,17 @@ struct NativeBridgeCallbacks {
 bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
     sleep(5);
 
-    auto libart = dlopen("libart.so", RTLD_NOW);
+    const char *libart_candidates[] = {
+            "libart.so",
+            "/apex/com.android.art/lib64/libart.so",
+            "/apex/com.android.art/lib/libart.so",
+            "/system/lib64/libart.so",
+            "/system/lib/libart.so",
+    };
+    auto libart = OpenLibraryCandidates(libart_candidates,
+                                        sizeof(libart_candidates) / sizeof(libart_candidates[0]));
     if (!libart) {
-        LOGE("dlopen libart.so failed");
+        LOGE("dlopen libart.so failed from all candidates");
         return false;
     }
     auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(libart,
@@ -196,11 +230,25 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
         return false;
     }
 
-    auto nb = dlopen("libhoudini.so", RTLD_NOW);
+    const char *native_bridge_candidates[] = {
+            "libhoudini.so",
+            "/system/lib64/libhoudini.so",
+            "/system/lib/libhoudini.so",
+            "/system/lib64/libndk_translation.so",
+            "/system/lib/libndk_translation.so",
+    };
+    auto nb = OpenLibraryCandidates(native_bridge_candidates,
+                                    sizeof(native_bridge_candidates) /
+                                    sizeof(native_bridge_candidates[0]));
     if (!nb) {
         auto native_bridge = GetNativeBridgeLibrary();
         LOGI("native bridge: %s", native_bridge.data());
-        nb = dlopen(native_bridge.data(), RTLD_NOW);
+        const char *native_bridge_prop_candidates[] = {
+                native_bridge.c_str(),
+        };
+        nb = OpenLibraryCandidates(native_bridge_prop_candidates,
+                                   sizeof(native_bridge_prop_candidates) /
+                                   sizeof(native_bridge_prop_candidates[0]));
     }
     if (nb) {
         LOGI("nb %p", nb);
