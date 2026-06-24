@@ -4,13 +4,17 @@
 
 #include "il2cpp_dump.h"
 #include <dlfcn.h>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <cinttypes>
+#include <cstdio>
 #include <string>
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include <limits.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "xdl.h"
 #include "log.h"
@@ -25,12 +29,199 @@
 
 static uint64_t il2cpp_base = 0;
 
+struct ProcMapEntry {
+    uintptr_t start;
+    uintptr_t end;
+    std::string perms;
+    std::string path;
+    std::string line;
+};
+
+static void *resolve_il2cpp_api(void *handle, const char *name) {
+    void *symbol = xdl_sym(handle, name, nullptr);
+    if (symbol) {
+        return symbol;
+    }
+
+    symbol = xdl_dsym(handle, name, nullptr);
+    if (symbol) {
+        LOGI("api resolved from symtab %s: %p", name, symbol);
+        return symbol;
+    }
+
+    LOGW("api not found %s", name);
+    return nullptr;
+}
+
+static bool ensure_dir(const std::string &path) {
+    if (mkdir(path.c_str(), 0700) == 0) {
+        return true;
+    }
+    if (errno == EEXIST) {
+        return true;
+    }
+    LOGE("mkdir %s failed: %s", path.c_str(), strerror(errno));
+    return false;
+}
+
+static bool parse_proc_map_line(const std::string &line, ProcMapEntry *entry) {
+    unsigned long long start = 0;
+    unsigned long long end = 0;
+    char perms[5] = {};
+    char path[PATH_MAX] = {};
+    int count = sscanf(line.c_str(), "%llx-%llx %4s %*s %*s %*s %1023[^\n]", &start, &end, perms,
+                       path);
+    if (count < 3) {
+        return false;
+    }
+    entry->start = static_cast<uintptr_t>(start);
+    entry->end = static_cast<uintptr_t>(end);
+    entry->perms = perms;
+    entry->path = count >= 4 ? path : "";
+    entry->line = line;
+    return true;
+}
+
+static std::string strip_deleted_suffix(const std::string &path) {
+    constexpr const char *suffix = " (deleted)";
+    auto suffix_len = strlen(suffix);
+    if (path.size() > suffix_len && path.compare(path.size() - suffix_len, suffix_len, suffix) == 0) {
+        return path.substr(0, path.size() - suffix_len);
+    }
+    return path;
+}
+
+static bool contains_path(const std::vector<std::string> &paths, const std::string &path) {
+    for (const auto &item: paths) {
+        if (item == path) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::vector<ProcMapEntry> write_proc_maps(const std::string &out_path) {
+    std::vector<ProcMapEntry> entries;
+    std::ifstream in("/proc/self/maps");
+    if (!in) {
+        LOGE("open /proc/self/maps failed");
+        return entries;
+    }
+
+    std::ofstream out(out_path);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (out) {
+            out << line << "\n";
+        }
+        ProcMapEntry entry{};
+        if (parse_proc_map_line(line, &entry)) {
+            entries.push_back(entry);
+        }
+    }
+    return entries;
+}
+
+static bool copy_file(const std::string &src_path, const std::string &dst_path) {
+    std::ifstream src(src_path, std::ios::binary);
+    if (!src) {
+        LOGW("open metadata candidate failed: %s", src_path.c_str());
+        return false;
+    }
+    std::ofstream dst(dst_path, std::ios::binary);
+    if (!dst) {
+        LOGW("create metadata copy failed: %s", dst_path.c_str());
+        return false;
+    }
+
+    char buffer[8192];
+    while (src) {
+        src.read(buffer, sizeof(buffer));
+        auto read_count = src.gcount();
+        if (read_count > 0) {
+            dst.write(buffer, read_count);
+        }
+    }
+    return !dst.bad();
+}
+
+static void write_symbol_probe_line(std::ofstream &out, void *handle, const char *name) {
+    size_t dyn_size = 0;
+    void *dynsym = xdl_sym(handle, name, &dyn_size);
+    size_t symtab_size = 0;
+    void *symtab = xdl_dsym(handle, name, &symtab_size);
+    out << name << " dynsym=" << dynsym << " dynsym_size=" << dyn_size << " symtab=" << symtab
+        << " symtab_size=" << symtab_size << "\n";
+}
+
+static void write_symbol_probe(void *handle, const std::string &path) {
+    std::ofstream out(path);
+    if (!out) {
+        LOGE("create symbol probe failed: %s", path.c_str());
+        return;
+    }
+
+#define DO_API(r, n, p) write_symbol_probe_line(out, handle, #n);
+
+#include "il2cpp-api-functions.h"
+
+#undef DO_API
+}
+
+static void write_il2cpp_maps(const std::vector<ProcMapEntry> &entries, const std::string &path,
+                              std::vector<std::string> *metadata_paths) {
+    std::ofstream out(path);
+    if (!out) {
+        LOGE("create il2cpp maps failed: %s", path.c_str());
+        return;
+    }
+
+    for (const auto &entry: entries) {
+        const bool is_il2cpp = entry.line.find("libil2cpp.so") != std::string::npos;
+        const bool is_metadata = entry.line.find("global-metadata.dat") != std::string::npos;
+        if (!is_il2cpp && !is_metadata) {
+            continue;
+        }
+
+        out << entry.line << "\n";
+        if (is_metadata && metadata_paths) {
+            auto metadata_path = strip_deleted_suffix(entry.path);
+            if (!metadata_path.empty() && metadata_path[0] == '/' &&
+                !contains_path(*metadata_paths, metadata_path)) {
+                metadata_paths->push_back(metadata_path);
+            }
+        }
+    }
+}
+
+static void write_phdr_info(void *handle, const std::string &path) {
+    std::ofstream out(path);
+    if (!out) {
+        LOGE("create phdr info failed: %s", path.c_str());
+        return;
+    }
+
+    xdl_info_t info{};
+    if (xdl_info(handle, XDL_DI_DLINFO, &info) != 0) {
+        out << "xdl_info failed\n";
+        return;
+    }
+
+    out << "name=" << (info.dli_fname ? info.dli_fname : "") << "\n";
+    out << "base=" << info.dli_fbase << "\n";
+    out << "phnum=" << info.dlpi_phnum << "\n";
+    for (size_t i = 0; i < info.dlpi_phnum; ++i) {
+        const auto &phdr = info.dlpi_phdr[i];
+        out << "phdr[" << i << "] type=0x" << std::hex << phdr.p_type << " flags=0x"
+            << phdr.p_flags << " vaddr=0x" << phdr.p_vaddr << " memsz=0x" << phdr.p_memsz
+            << " filesz=0x" << phdr.p_filesz << " offset=0x" << phdr.p_offset << std::dec
+            << "\n";
+    }
+}
+
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
-    n = (r (*) p)xdl_sym(handle, #n, nullptr); \
-    if(!n) {                                   \
-        LOGW("api not found %s", #n);          \
-    }                                          \
+    n = (r (*) p)resolve_il2cpp_api(handle, #n); \
 }
 
 #include "il2cpp-api-functions.h"
@@ -320,6 +511,48 @@ std::string dump_type(const Il2CppType *type) {
     //TODO EventInfo
     outPut << "}\n";
     return outPut.str();
+}
+
+void il2cpp_dump_diagnostics(void *handle, const char *outDir, const char *reason) {
+    if (!outDir || outDir[0] == '\0') {
+        LOGE("diagnostics output dir is null");
+        return;
+    }
+
+    auto files_dir = std::string(outDir).append("/files");
+    if (!ensure_dir(files_dir)) {
+        return;
+    }
+    auto diag_dir = files_dir + "/il2cpp_diag";
+    if (!ensure_dir(diag_dir)) {
+        return;
+    }
+
+    LOGI("write il2cpp diagnostics: %s", diag_dir.c_str());
+    auto maps = write_proc_maps(diag_dir + "/maps.txt");
+    std::vector<std::string> metadata_paths;
+    write_il2cpp_maps(maps, diag_dir + "/il2cpp_maps.txt", &metadata_paths);
+    write_phdr_info(handle, diag_dir + "/phdr.txt");
+    write_symbol_probe(handle, diag_dir + "/symbol_probe.txt");
+
+    // Game update note: if a new game moves metadata out of a mapped
+    // global-metadata.dat file, extend this diagnostic collector with that
+    // game's asset path before writing a new registration resolver.
+    std::ofstream summary(diag_dir + "/summary.txt");
+    if (summary) {
+        summary << "reason=" << (reason ? reason : "unknown") << "\n";
+        summary << "diag_dir=" << diag_dir << "\n";
+        summary << "metadata_candidates=" << metadata_paths.size() << "\n";
+        summary << "next_step=use symbol_probe and il2cpp_maps to add a registration/metadata resolver\n";
+    }
+
+    int index = 0;
+    for (const auto &metadata_path: metadata_paths) {
+        auto dst_path = diag_dir + "/global-metadata-" + std::to_string(index++) + ".dat";
+        if (copy_file(metadata_path, dst_path)) {
+            LOGI("copied metadata candidate: %s", dst_path.c_str());
+        }
+    }
 }
 
 bool il2cpp_api_init(void *handle) {

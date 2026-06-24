@@ -61,6 +61,7 @@ void hack_start(const char *game_data_dir) {
             if (il2cpp_api_init(handle)) {
                 il2cpp_dump(game_data_dir);
             } else {
+                il2cpp_dump_diagnostics(handle, game_data_dir, "il2cpp api init failed");
                 LOGE("skip dump because il2cpp api init failed");
             }
             break;
